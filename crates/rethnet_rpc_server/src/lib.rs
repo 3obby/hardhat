@@ -8,6 +8,7 @@ use axum::{
     Router,
 };
 use hashbrown::{HashMap, HashSet};
+use rethnet_evm::AnalysisKind;
 use secp256k1::{Secp256k1, SecretKey};
 use sha3::{Digest, Keccak256};
 use tokio::sync::RwLock;
@@ -23,7 +24,7 @@ use rethnet_eth::{
         BlockSpec, BlockTag, Eip1898BlockSpec, ZeroXPrefixedBytes,
     },
     signature::{public_key_to_address, Signature},
-    Address, Bytes, B256, U256, U64,
+    Address, Bytes, SpecId, B256, U256, U64,
 };
 use rethnet_evm::{
     blockchain::{
@@ -31,7 +32,8 @@ use rethnet_evm::{
         LocalCreationError, SyncBlockchain,
     },
     state::{AccountModifierFn, ForkState, HybridState, StateError, SyncState},
-    AccountInfo, Bytecode, MemPool, RandomHashGenerator, KECCAK_EMPTY,
+    AccountInfo, BlockMiner, Bytecode, CfgEnv, MemPool, MineBlockResult, RandomHashGenerator,
+    KECCAK_EMPTY,
 };
 
 mod hardhat_methods;
@@ -86,19 +88,38 @@ type BlockchainType = Arc<RwLock<dyn SyncBlockchain<BlockchainError>>>;
 
 struct AppState {
     allow_blocks_with_same_timestamp: bool,
+    allow_unlimited_contract_size: bool,
+    block_gas_limit: U256,
     blockchain: Arc<RwLock<dyn SyncBlockchain<BlockchainError>>>,
     block_time_offset_seconds: RwLock<U256>,
     rethnet_state: RethnetStateType,
-    chain_id: U64,
+    chain_id: U256,
     coinbase: Address,
     filters: RwLock<HashMap<U256, Filter>>,
     fork_block_number: Option<U256>,
+    hardfork: SpecId,
     impersonated_accounts: RwLock<HashSet<Address>>,
     last_filter_id: RwLock<U256>,
     local_accounts: HashMap<Address, SecretKey>,
-    _mem_pool: Arc<RwLock<MemPool>>,
+    mem_pool: Arc<RwLock<MemPool>>,
     network_id: U64,
     next_block_timestamp: RwLock<U256>,
+}
+
+impl From<&AppState> for CfgEnv {
+    fn from(state: &AppState) -> Self {
+        Self {
+            chain_id: state.chain_id,
+            spec_id: state.hardfork,
+            perf_analyse_created_bytecodes: AnalysisKind::default(),
+            limit_contract_code_size: if state.allow_unlimited_contract_size {
+                Some(usize::MAX)
+            } else {
+                None
+            },
+            ..CfgEnv::default()
+        }
+    }
 }
 
 type StateType = Arc<AppState>;
@@ -317,6 +338,63 @@ async fn handle_evm_increase_time(
     *offset += increment;
     ResponseData::Success {
         result: offset.to_string(),
+    }
+}
+
+fn log_block(_result: MineBlockResult) {}
+
+async fn handle_evm_mine(state: StateType, timestamp: Option<U256OrUsize>) -> ResponseData<String> {
+    event!(Level::INFO, "evm_mine({timestamp:?})");
+    let latest_block = if let Ok(latest_block) = state.blockchain.read().await.last_block() {
+        latest_block
+    } else {
+        return error_response_data(0, "Error accessing latest block");
+    };
+    let timestamp: Option<U256> = timestamp.map(U256OrUsize::into);
+    let timestamp = if let Some(timestamp) = timestamp {
+        if timestamp
+            .checked_sub(latest_block.header.timestamp)
+            .is_none()
+        {
+            return error_response_data(
+                0,
+                &format!(
+                    "Timestamp {:?} is lower than the previous block's timestamp {}",
+                    timestamp, latest_block.header.timestamp
+                ),
+            );
+        } else {
+            timestamp
+        }
+    } else {
+        // TODO: calculate the proper timestamp
+        U256::ZERO
+    };
+    // TODO: once we support hardhat_setNextBlockBaseFeePerGas, use the value that it set here (if
+    // there is one currently) instead of calculating it from the last block.
+    let base_fee = latest_block.header.base_fee_per_gas;
+    // TODO: actually calculate the next block's base fee, instead of just using the previous
+    // block's, or figure out what API will give us that here.
+    let reward = U256::ZERO;
+    let result = BlockMiner::<BlockchainError, StateError>::new(
+        Arc::clone(&state.blockchain),
+        Arc::clone(&state.rethnet_state),
+        Arc::clone(&state.mem_pool),
+        RandomHashGenerator::with_seed("BlockMiner"),
+        CfgEnv::from(&*state),
+        state.block_gas_limit,
+        state.coinbase,
+    )
+    .mine_block(timestamp, reward, base_fee)
+    .await;
+    match result {
+        Ok(result) => {
+            log_block(result);
+            ResponseData::Success {
+                result: String::from("0"),
+            }
+        }
+        Err(e) => error_response_data(0, &format!("Error mining block: {e}")),
     }
 }
 
@@ -778,6 +856,9 @@ async fn handle_request(
                 MethodInvocation::Eth(EthMethodInvocation::EvmIncreaseTime(increment)) => {
                     response(id, handle_evm_increase_time(state, increment.clone()).await)
                 }
+                MethodInvocation::Eth(EthMethodInvocation::EvmMine(timestamp)) => {
+                    response(id, handle_evm_mine(state, timestamp.clone()).await)
+                }
                 MethodInvocation::Eth(EthMethodInvocation::EvmSetNextBlockTimestamp(timestamp)) => {
                     response(
                         id,
@@ -984,7 +1065,12 @@ impl Server {
                 .unzip()
         };
 
+        // TODO: only declare here the things that are needed to instantiate blockchain, state and
+        // fork_block_number. everything else here should be moved into the AppState declaration
+        // afterwards.
+
         let allow_blocks_with_same_timestamp = config.allow_blocks_with_same_timestamp;
+        let block_gas_limit = config.block_gas_limit;
         let block_time_offset_seconds =
             RwLock::new(if let Some(initial_date) = config.initial_date {
                 U256::from(
@@ -1001,10 +1087,10 @@ impl Server {
         let filters = RwLock::new(HashMap::default());
         let impersonated_accounts = RwLock::new(HashSet::new());
         let last_filter_id = RwLock::new(U256::ZERO);
-        let _mem_pool = Arc::new(RwLock::new(MemPool::new(config.block_gas_limit)));
+        let mem_pool = Arc::new(RwLock::new(MemPool::new(block_gas_limit)));
         let network_id = config.network_id;
         let next_block_timestamp = RwLock::new(U256::ZERO);
-        let spec_id = config.hardfork;
+        let hardfork = config.hardfork;
 
         let (rethnet_state, blockchain, fork_block_number): (
             RethnetStateType,
@@ -1023,7 +1109,7 @@ impl Server {
 
             let blockchain = ForkedBlockchain::new(
                 Arc::clone(&runtime),
-                spec_id,
+                hardfork,
                 &config.json_rpc_url,
                 config.block_number.map(U256::from),
             )
@@ -1046,7 +1132,7 @@ impl Server {
             let rethnet_state = HybridState::with_accounts(genesis_accounts);
             let blockchain = Arc::new(RwLock::new(LocalBlockchain::new(
                 &rethnet_state,
-                spec_id,
+                hardfork,
                 config.gas,
                 config.initial_date.map(|d| {
                     U256::from(
@@ -1065,6 +1151,8 @@ impl Server {
 
         let app_state = Arc::new(AppState {
             allow_blocks_with_same_timestamp,
+            allow_unlimited_contract_size: config.allow_unlimited_contract_size,
+            block_gas_limit,
             blockchain,
             block_time_offset_seconds,
             rethnet_state,
@@ -1072,10 +1160,11 @@ impl Server {
             coinbase,
             filters,
             fork_block_number,
+            hardfork,
             impersonated_accounts,
             last_filter_id,
             local_accounts,
-            _mem_pool,
+            mem_pool,
             network_id,
             next_block_timestamp,
         });

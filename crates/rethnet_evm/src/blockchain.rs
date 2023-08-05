@@ -21,7 +21,7 @@ pub enum BlockchainError {
     #[error("Block number exceeds storage capacity.")]
     BlockNumberTooLarge,
     /// Invalid block number
-    #[error("Invalid block number: ${actual}. Expected: ${expected}.")]
+    #[error("Invalid block number: {actual}. Expected: {expected}.")]
     InvalidBlockNumber {
         /// Provided block number
         actual: U256,
@@ -29,7 +29,7 @@ pub enum BlockchainError {
         expected: U256,
     },
     /// Invalid parent hash
-    #[error("Invalid parent hash: ${actual}. Expected: ${expected}.")]
+    #[error("Invalid parent hash: {actual}. Expected: {expected}.")]
     InvalidParentHash {
         /// Provided parent hash
         actual: B256,

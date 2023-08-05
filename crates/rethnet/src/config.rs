@@ -35,9 +35,10 @@ pub const DEFAULT_PRIVATE_KEYS: [&str; 20] = [
 pub struct ConfigFile {
     // TODO: expand this per https://github.com/NomicFoundation/rethnet/issues/111
     pub allow_blocks_with_same_timestamp: Option<bool>,
+    pub allow_unlimited_contract_size: Option<bool>,
     pub accounts: Option<Vec<AccountConfig>>,
     pub block_gas_limit: Option<U256>,
-    pub chain_id: Option<u64>,
+    pub chain_id: Option<U256>,
     pub coinbase: Option<Address>,
     pub gas: Option<U256>,
     pub initial_base_fee_per_gas: Option<U256>,
@@ -54,6 +55,13 @@ impl ConfigFile {
                 partial.allow_blocks_with_same_timestamp.unwrap_or(
                     default
                         .allow_blocks_with_same_timestamp
+                        .expect("should have a default value"),
+                ),
+            ),
+            allow_unlimited_contract_size: Some(
+                partial.allow_unlimited_contract_size.unwrap_or(
+                    default
+                        .allow_unlimited_contract_size
                         .expect("should have a default value"),
                 ),
             ),
@@ -113,6 +121,7 @@ impl Default for ConfigFile {
         let chain_id = Some(31337);
         Self {
             allow_blocks_with_same_timestamp: Some(false),
+            allow_unlimited_contract_size: Some(false),
             accounts: Some(
                 DEFAULT_PRIVATE_KEYS
                     .into_iter()
@@ -127,7 +136,7 @@ impl Default for ConfigFile {
                     .collect(),
             ),
             block_gas_limit,
-            chain_id,
+            chain_id: chain_id.map(U256::from),
             coinbase: Some(
                 Address::from_str("0xc014ba5ec014ba5ec014ba5ec014ba5ec014ba5e")
                     .expect("default value should be known to succeed"),

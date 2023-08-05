@@ -41,6 +41,7 @@ async fn start_server() -> SocketAddr {
     let server = Server::new(Config {
         address: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
         allow_blocks_with_same_timestamp: false,
+        allow_unlimited_contract_size: false,
         rpc_hardhat_network_config: RpcHardhatNetworkConfig { forking: None },
         accounts: vec![AccountConfig {
             private_key: SecretKey::from_str(PRIVATE_KEY)
@@ -48,7 +49,7 @@ async fn start_server() -> SocketAddr {
             balance: U256::ZERO,
         }],
         block_gas_limit: U256::from(30_000_000),
-        chain_id: U64::from(1),
+        chain_id: U256::from(1),
         coinbase: Address::from_low_u64_ne(1),
         gas: U256::from(30_000_000),
         hardfork: SpecId::LATEST,
@@ -159,6 +160,25 @@ async fn test_evm_increase_time() {
             U256::from(12345),
         ))),
         String::from("12345"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_evm_mine() {
+    let server = start_server().await;
+    verify_response(
+        &server,
+        MethodInvocation::Eth(EthMethodInvocation::EvmMine(Some(U256OrUsize::U256(
+            U256::from(2147483647),
+        )))),
+        String::from("0"),
+    )
+    .await;
+    verify_response(
+        &server,
+        MethodInvocation::Eth(EthMethodInvocation::EvmMine(None)),
+        String::from("0"),
     )
     .await;
 }

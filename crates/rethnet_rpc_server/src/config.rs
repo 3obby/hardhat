@@ -9,11 +9,12 @@ pub use crate::hardhat_methods::reset::{RpcForkConfig, RpcHardhatNetworkConfig};
 
 pub struct Config {
     pub allow_blocks_with_same_timestamp: bool,
+    pub allow_unlimited_contract_size: bool,
     pub address: SocketAddr,
     pub rpc_hardhat_network_config: RpcHardhatNetworkConfig,
     pub accounts: Vec<AccountConfig>,
     pub block_gas_limit: U256,
-    pub chain_id: U64,
+    pub chain_id: U256,
     pub coinbase: Address,
     pub gas: U256,
     pub hardfork: SpecId,

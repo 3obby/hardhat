@@ -8,7 +8,7 @@ use clap::{Args, Parser, Subcommand};
 use secp256k1::{Error as Secp256k1Error, SecretKey};
 use tracing::{event, Level};
 
-use rethnet_eth::{Address, Bytes, U64};
+use rethnet_eth::{Address, Bytes, U256, U64};
 use rethnet_rpc_server::{
     AccountConfig as ServerAccountConfig, Config as ServerConfig, RpcForkConfig,
     RpcHardhatNetworkConfig,
@@ -46,6 +46,8 @@ struct NodeArgs {
     init_config_file: bool,
     #[clap(long, action = clap::ArgAction::SetTrue)]
     allow_blocks_with_same_timestamp: bool,
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    allow_unlimited_contract_size: bool,
     #[clap(long)]
     fork_url: Option<String>,
     #[clap(long)]
@@ -69,6 +71,10 @@ fn server_config_from_cli_args_and_config_file(
         allow_blocks_with_same_timestamp: node_args.allow_blocks_with_same_timestamp
             || config_file
                 .allow_blocks_with_same_timestamp
+                .expect("should be resolved to default"),
+        allow_unlimited_contract_size: node_args.allow_unlimited_contract_size
+            || config_file
+                .allow_unlimited_contract_size
                 .expect("should be resolved to default"),
         address: SocketAddr::new(node_args.host, node_args.port),
         rpc_hardhat_network_config: RpcHardhatNetworkConfig {
@@ -97,8 +103,8 @@ fn server_config_from_cli_args_and_config_file(
             .expect("should be resovled to default"),
         chain_id: node_args
             .chain_id
+            .map(U256::from)
             .or(config_file.chain_id)
-            .map(U64::from)
             .expect("should be resolved to default"),
         coinbase: node_args
             .coinbase
